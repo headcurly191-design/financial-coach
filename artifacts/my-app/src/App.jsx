@@ -1145,6 +1145,246 @@ function GoalPlanner({ onAsk }) {
   );
 }
 
+// ─── PORTFOLIO TAB ────────────────────────────────────────────────────────────
+function PortfolioTab({ onAsk }) {
+  const [positions, setPositions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("atlas_portfolio") || "[]"); } catch { return []; }
+  });
+  const [liveData, setLiveData] = useState({});
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState({ symbol: "", shares: "", buyPrice: "", buyDate: new Date().toISOString().slice(0, 10) });
+  const [formErr, setFormErr] = useState("");
+
+  const save = (next) => {
+    setPositions(next);
+    localStorage.setItem("atlas_portfolio", JSON.stringify(next));
+  };
+
+  const addPosition = () => {
+    setFormErr("");
+    if (!form.symbol.trim()) return setFormErr("Symbol is required");
+    if (!form.shares || isNaN(+form.shares) || +form.shares <= 0) return setFormErr("Enter valid share count");
+    if (!form.buyPrice || isNaN(+form.buyPrice) || +form.buyPrice <= 0) return setFormErr("Enter valid buy price");
+    const pos = { id: Date.now(), symbol: form.symbol.trim().toUpperCase(), shares: +form.shares, buyPrice: +form.buyPrice, buyDate: form.buyDate };
+    save([...positions, pos]);
+    setForm({ symbol: "", shares: "", buyPrice: "", buyDate: new Date().toISOString().slice(0, 10) });
+    setShowAdd(false);
+  };
+
+  const removePosition = (id) => save(positions.filter(p => p.id !== id));
+
+  // Load live prices for all positions
+  useEffect(() => {
+    if (positions.length === 0) return;
+    const load = async () => {
+      const updates = {};
+      await Promise.all(positions.map(async pos => {
+        try {
+          const [quote, candles] = await Promise.all([
+            MarketAgent.fetchQuoteAny(pos.symbol),
+            HistoricalAgent.fetchCandles(pos.symbol),
+          ]);
+          const tech = HistoricalAgent.computeTechnicals(candles);
+          const signal = SignalEngine.analyze(quote, pos.symbol, tech);
+          updates[pos.id] = { quote, tech, signal };
+        } catch {}
+      }));
+      setLiveData(prev => ({ ...prev, ...updates }));
+    };
+    load();
+  }, [positions.length]);
+
+  // Totals
+  const totalInvested = positions.reduce((s, p) => s + p.shares * p.buyPrice, 0);
+  const totalCurrent  = positions.reduce((s, p) => {
+    const cur = liveData[p.id]?.quote?.c;
+    return s + (cur ? p.shares * cur : p.shares * p.buyPrice);
+  }, 0);
+  const totalPnL = totalCurrent - totalInvested;
+  const totalPnLPct = totalInvested > 0 ? (totalPnL / totalInvested) * 100 : 0;
+
+  const buildAskPrompt = () => {
+    if (positions.length === 0) return "";
+    const lines = positions.map(p => {
+      const d = liveData[p.id];
+      const cur = d?.quote?.c;
+      const pnl = cur ? ((cur - p.buyPrice) / p.buyPrice * 100).toFixed(2) : "loading";
+      const sig = d?.signal?.signal || "loading";
+      return `${p.symbol}: bought ${p.shares} shares @ $${p.buyPrice} on ${p.buyDate} | current: ${cur ? "$" + cur.toFixed(2) : "loading"} | P&L: ${pnl}% | signal: ${sig}`;
+    }).join("\n");
+    return `Review my portfolio and give me specific recommendations for each position:\n\n${lines}\n\nFor each position tell me: should I hold, add, or sell? When exactly should I sell (price target or trigger)? What is the risk right now? Is there a better stock I should rotate into?`;
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 32px" }}>
+      {/* Summary */}
+      {positions.length > 0 && (
+        <div style={{ background: `linear-gradient(145deg, ${totalPnL >= 0 ? "rgba(48,209,88,0.1)" : "rgba(255,69,58,0.1)"}, rgba(0,0,0,0))`, border: `0.5px solid ${totalPnL >= 0 ? T.greenBorder : T.redBorder}`, borderRadius: T.radius.lg, padding: 18, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Portfolio Summary</div>
+            <button onClick={() => onAsk(buildAskPrompt())} style={{ background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "5px 12px", color: T.gold, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: T.font }}>Ask ATLAS to review all</button>
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>TOTAL INVESTED</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: T.text, fontVariantNumeric: "tabular-nums" }}>${totalInvested.toFixed(2)}</div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>CURRENT VALUE</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: T.text, fontVariantNumeric: "tabular-nums" }}>${totalCurrent.toFixed(2)}</div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>TOTAL P&L</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: totalPnL >= 0 ? T.green : T.red, fontVariantNumeric: "tabular-nums" }}>
+                {totalPnL >= 0 ? "+" : ""}${totalPnL.toFixed(2)}
+              </div>
+              <div style={{ fontSize: 11, color: totalPnL >= 0 ? T.green : T.red, fontVariantNumeric: "tabular-nums" }}>{totalPnLPct >= 0 ? "+" : ""}{totalPnLPct.toFixed(2)}%</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Button */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Positions ({positions.length})</div>
+        <button onClick={() => setShowAdd(s => !s)} style={{ background: showAdd ? "rgba(255,255,255,0.07)" : T.goldDim, border: `0.5px solid ${showAdd ? T.border : T.goldBorder}`, borderRadius: T.radius.xs, padding: "6px 14px", color: showAdd ? T.textMuted : T.gold, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: T.font }}>
+          {showAdd ? "✕ Cancel" : "+ Add Position"}
+        </button>
+      </div>
+
+      {/* Add Form */}
+      {showAdd && (
+        <div style={{ background: T.cardHigh, border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.md, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: T.gold, marginBottom: 12 }}>New Position</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>TICKER</div>
+              <input value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} placeholder="e.g. AAPL" style={{ width: "100%", background: "rgba(0,0,0,0.3)", border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.sm, padding: "9px 12px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>SHARES</div>
+              <input value={form.shares} onChange={e => setForm(f => ({ ...f, shares: e.target.value }))} placeholder="e.g. 10" type="number" min="0" style={{ width: "100%", background: "rgba(0,0,0,0.3)", border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.sm, padding: "9px 12px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>BUY PRICE ($)</div>
+              <input value={form.buyPrice} onChange={e => setForm(f => ({ ...f, buyPrice: e.target.value }))} placeholder="e.g. 182.50" type="number" min="0" style={{ width: "100%", background: "rgba(0,0,0,0.3)", border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.sm, padding: "9px 12px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>BUY DATE</div>
+              <input value={form.buyDate} onChange={e => setForm(f => ({ ...f, buyDate: e.target.value }))} type="date" style={{ width: "100%", background: "rgba(0,0,0,0.3)", border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.sm, padding: "9px 12px", color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box", colorScheme: "dark" }} />
+            </div>
+          </div>
+          {formErr && <div style={{ fontSize: 12, color: T.red, marginBottom: 8 }}>{formErr}</div>}
+          <button onClick={addPosition} style={{ width: "100%", padding: "11px 0", borderRadius: T.radius.md, border: "none", background: `linear-gradient(145deg, ${T.gold}, #8b5e12)`, color: "#000", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: T.font }}>
+            Add to Portfolio
+          </button>
+        </div>
+      )}
+
+      {/* Position Cards */}
+      {positions.length === 0 && !showAdd ? (
+        <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
+          <div style={{ fontSize: 36, marginBottom: 12 }}>📊</div>
+          <div style={{ fontSize: 14, color: T.textSub, marginBottom: 6 }}>No positions yet</div>
+          <div style={{ fontSize: 12 }}>Tap "+ Add Position" to log your first trade.</div>
+        </div>
+      ) : (
+        positions.map(pos => {
+          const d = liveData[pos.id] || {};
+          const cur = d.quote?.c;
+          const invested = pos.shares * pos.buyPrice;
+          const current  = cur ? pos.shares * cur : null;
+          const pnl      = current !== null ? current - invested : null;
+          const pnlPct   = pnl !== null ? (pnl / invested) * 100 : null;
+          const isUp     = pnl !== null ? pnl >= 0 : null;
+          const sig      = d.signal;
+          const tech     = d.tech;
+          const risk     = sig?.risk;
+
+          // Sell target
+          const sellTarget = sig?.sellAt || (tech?.bb?.upper) || (cur ? cur * 1.08 : null);
+          const toSellTarget = sellTarget && cur ? ((sellTarget - cur) / cur * 100) : null;
+
+          // Days held
+          const daysSince = Math.floor((Date.now() - new Date(pos.buyDate).getTime()) / 86400000);
+
+          return (
+            <div key={pos.id} style={{ background: T.card, border: `0.5px solid ${isUp === null ? T.border : isUp ? T.greenBorder : T.redBorder}`, borderRadius: T.radius.md, marginBottom: 12, overflow: "hidden" }}>
+              <div style={{ padding: 16 }}>
+                {/* Header */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 17, fontWeight: 700, color: T.text }}>{pos.symbol}</span>
+                      {sig && <SignalPill signal={sig.signal} strength={sig.strength} />}
+                      {risk && <RiskBadge risk={risk} />}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{pos.shares} shares · bought ${pos.buyPrice.toFixed(2)} · {daysSince}d ago</div>
+                  </div>
+                  <button onClick={() => removePosition(pos.id)} style={{ background: "rgba(255,69,58,0.1)", border: `0.5px solid ${T.redBorder}`, borderRadius: T.radius.xs, padding: "4px 8px", color: T.red, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>Remove</button>
+                </div>
+
+                {/* P&L Row */}
+                <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+                  <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: T.radius.sm, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3 }}>INVESTED</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums" }}>${invested.toFixed(2)}</div>
+                  </div>
+                  <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: T.radius.sm, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3 }}>CURRENT</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums" }}>{current !== null ? `$${current.toFixed(2)}` : "…"}</div>
+                  </div>
+                  <div style={{ flex: 1, background: isUp === null ? "rgba(255,255,255,0.04)" : isUp ? T.greenDim : T.redDim, borderRadius: T.radius.sm, padding: "10px 12px", border: `0.5px solid ${isUp === null ? "transparent" : isUp ? T.greenBorder : T.redBorder}` }}>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 3 }}>P&L</div>
+                    {pnl !== null ? (
+                      <>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: isUp ? T.green : T.red, fontVariantNumeric: "tabular-nums" }}>{isUp ? "+" : ""}${pnl.toFixed(2)}</div>
+                        <div style={{ fontSize: 10, color: isUp ? T.green : T.red, fontVariantNumeric: "tabular-nums" }}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%</div>
+                      </>
+                    ) : <div style={{ fontSize: 14, color: T.textMuted }}>…</div>}
+                  </div>
+                </div>
+
+                {/* Sell Target */}
+                {cur && sellTarget && (
+                  <div style={{ background: toSellTarget > 0 ? T.goldDim : T.redDim, border: `0.5px solid ${toSellTarget > 0 ? T.goldBorder : T.redBorder}`, borderRadius: T.radius.sm, padding: "9px 12px", marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 2 }}>ATLAS SELL TARGET</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: T.gold }}>${sellTarget.toFixed(2)}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 2 }}>TO TARGET</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: toSellTarget > 0 ? T.green : T.red }}>{toSellTarget > 0 ? "+" : ""}{toSellTarget.toFixed(2)}%</div>
+                      </div>
+                    </div>
+                    {sig?.signal === "SELL" && (
+                      <div style={{ marginTop: 6, fontSize: 11, color: T.red, fontWeight: 600 }}>⚠️ ATLAS says: SELL NOW — {sig.reason?.slice(0, 80)}</div>
+                    )}
+                    {sig?.signal === "HOLD" && (
+                      <div style={{ marginTop: 6, fontSize: 11, color: T.gold }}>Hold — target not reached yet ({toSellTarget?.toFixed(1)}% away)</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Confidence */}
+                {tech && <ConfidenceBar value={tech.confidence} color={tech.compositeSignal === "BULLISH" ? T.green : tech.compositeSignal === "BEARISH" ? T.red : T.gold} />}
+
+                <button onClick={() => onAsk(`Analyze my ${pos.symbol} position: I bought ${pos.shares} shares at $${pos.buyPrice} on ${pos.buyDate}. ${cur ? `Current price: $${cur.toFixed(2)}.` : ""} ${pnlPct !== null ? `I'm ${pnlPct >= 0 ? "up" : "down"} ${Math.abs(pnlPct).toFixed(2)}%.` : ""} Should I hold, add more, or sell? Give me the exact sell target, risk level, and what to watch for.`)}
+                  style={{ width: "100%", marginTop: 12, padding: "9px 0", borderRadius: T.radius.sm, border: `0.5px solid ${T.goldBorder}`, background: T.goldDim, color: T.gold, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: T.font }}>
+                  Ask ATLAS about this position
+                </button>
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN ──────────────────────────────────────────────────────────────────────
 export default function ATLASv4() {
   const [tab, setTab] = useState("chat");
@@ -1298,6 +1538,7 @@ export default function ATLASv4() {
     { id: "chat",      label: "Chat" },
     { id: "market",    label: "Market" },
     { id: "watchlist", label: `Watch${favorites.length > 0 ? ` (${favorites.length})` : ""}` },
+    { id: "portfolio", label: "Portfolio" },
     { id: "plan",      label: "Plan" },
   ];
 
@@ -1485,6 +1726,11 @@ export default function ATLASv4() {
       {/* ── WATCHLIST TAB ── */}
       {tab === "watchlist" && (
         <WatchlistTab favorites={favorites} onToggleFav={toggleFav} onAsk={sendMessage} marketData={marketData} />
+      )}
+
+      {/* ── PORTFOLIO TAB ── */}
+      {tab === "portfolio" && (
+        <PortfolioTab onAsk={sendMessage} />
       )}
 
       {/* ── PLAN TAB ── */}
