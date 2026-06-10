@@ -8,18 +8,41 @@ import {
 const getFinnhubKey = () => (typeof import.meta !== "undefined" && import.meta.env?.VITE_FINNHUB_KEY) || "";
 const API_BASE = "/api";
 
-// ─── SECURITY AGENT ────────────────────────────────────────────────────────────
+// ─── SECURITY GUARDIAN ─────────────────────────────────────────────────────────
 const SecurityAgent = {
   log: [],
   sessionId: Math.random().toString(36).slice(2, 10).toUpperCase(),
+  _requestTimestamps: [],
+  RATE_LIMIT: { maxRequests: 20, windowMs: 60_000 },
+  THREAT_PATTERNS: [
+    /(<script|javascript:|on\w+\s*=|<iframe|<object|eval\s*\(|document\.cookie|window\.location)/gi,
+    /(union\s+select|drop\s+table|insert\s+into|delete\s+from|exec\s*\()/gi,
+    /(\.\.\/|\.\.\\|%2e%2e|%252e)/gi,
+  ],
   sanitize(input) {
     if (typeof input !== "string") return "";
-    const cleaned = input
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "[BLOCKED]")
-      .replace(/javascript:/gi, "[BLOCKED]")
-      .replace(/on\w+\s*=/gi, "[BLOCKED]");
-    if (cleaned !== input) this.logEvent("THREAT_BLOCKED", "Malicious input sanitized");
+    let cleaned = input;
+    let blocked = false;
+    this.THREAT_PATTERNS.forEach(pattern => {
+      if (pattern.test(cleaned)) { cleaned = cleaned.replace(pattern, "[BLOCKED]"); blocked = true; }
+    });
+    if (blocked) this.logEvent("THREAT_BLOCKED", `Malicious pattern in input: ${input.slice(0, 60)}`);
     return cleaned.slice(0, 4000);
+  },
+  checkRateLimit() {
+    const now = Date.now();
+    this._requestTimestamps = this._requestTimestamps.filter(t => now - t < this.RATE_LIMIT.windowMs);
+    if (this._requestTimestamps.length >= this.RATE_LIMIT.maxRequests) {
+      this.logEvent("RATE_LIMITED", `${this._requestTimestamps.length} requests in 60s`);
+      return false;
+    }
+    this._requestTimestamps.push(now);
+    return true;
+  },
+  validateApiResponse(data) {
+    if (typeof data !== "object" || data === null) return false;
+    if (data.content && typeof data.content !== "string") return false;
+    return true;
   },
   logEvent(type, detail) {
     const e = { time: new Date().toISOString(), type, detail, session: this.sessionId };
@@ -30,12 +53,89 @@ const SecurityAgent = {
   getReport() {
     return {
       threats: this.log.filter(e => e.type === "THREAT_BLOCKED"),
+      rateLimited: this.log.filter(e => e.type === "RATE_LIMITED"),
       apiCalls: this.log.filter(e => e.type === "API_CALL"),
       errors: this.log.filter(e => e.type === "ERROR"),
       total: this.log.length,
       sessionId: this.sessionId,
     };
   },
+};
+
+// ─── ERROR RECOVERY AGENT ──────────────────────────────────────────────────────
+const ErrorRecoveryAgent = {
+  MAX_RETRIES: 3,
+  BACKOFF_MS: [1200, 2500, 4000],
+  errorLog: [],
+  friendlyMessage(err) {
+    const msg = err?.message || String(err);
+    if (msg.includes("404")) return "ATLAS couldn't reach the AI service. The route is misconfigured — auto-retrying…";
+    if (msg.includes("429") || msg.includes("rate")) return "Too many requests. Waiting a moment before retrying…";
+    if (msg.includes("500") || msg.includes("502") || msg.includes("503")) return "The AI server had a hiccup. Retrying automatically…";
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("ECONNREFUSED")) return "Network connection lost. Retrying when connection restores…";
+    if (msg.includes("timeout") || msg.includes("AbortError")) return "Request timed out. Retrying with a fresh connection…";
+    if (msg.includes("GEMINI_API_KEY")) return "AI service key not configured on server. Please check environment variables.";
+    return `Something went wrong: ${msg.slice(0, 120)}`;
+  },
+  async withRetry(fn, onRetry) {
+    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
+      try {
+        return await fn(attempt);
+      } catch (err) {
+        const isLast = attempt === this.MAX_RETRIES;
+        this.errorLog.push({ time: new Date().toISOString(), attempt, error: err.message });
+        if (this.errorLog.length > 200) this.errorLog.shift();
+        SecurityAgent.logEvent("ERROR", `Attempt ${attempt}/${this.MAX_RETRIES}: ${err.message}`);
+        if (isLast) throw err;
+        if (onRetry) onRetry(attempt, this.BACKOFF_MS[attempt - 1]);
+        await new Promise(r => setTimeout(r, this.BACKOFF_MS[attempt - 1]));
+      }
+    }
+  },
+};
+
+// ─── PRICE ALERT MANAGER ───────────────────────────────────────────────────────
+const PriceAlertManager = {
+  _key: "atlas_price_alerts",
+  load() {
+    try { return JSON.parse(localStorage.getItem(this._key) || "[]"); } catch { return []; }
+  },
+  save(alerts) { localStorage.setItem(this._key, JSON.stringify(alerts)); },
+  add(symbol, targetPrice, direction) {
+    const alerts = this.load();
+    const id = Date.now();
+    alerts.push({ id, symbol: symbol.toUpperCase(), targetPrice: +targetPrice, direction, triggered: false, createdAt: new Date().toISOString() });
+    this.save(alerts);
+    return id;
+  },
+  remove(id) {
+    const alerts = this.load().filter(a => a.id !== id);
+    this.save(alerts);
+  },
+  markTriggered(id) {
+    const alerts = this.load().map(a => a.id === id ? { ...a, triggered: true, triggeredAt: new Date().toISOString() } : a);
+    this.save(alerts);
+  },
+  check(prices) {
+    const alerts = this.load();
+    let fired = 0;
+    alerts.forEach(alert => {
+      if (alert.triggered) return;
+      const cur = prices[alert.symbol];
+      if (!cur) return;
+      const hit = alert.direction === "above" ? cur >= alert.targetPrice : cur <= alert.targetPrice;
+      if (hit) {
+        const title = `🔔 ATLAS Alert: ${alert.symbol} ${alert.direction === "above" ? "reached" : "dropped to"} $${cur.toFixed(2)}`;
+        const body = `Your target was $${alert.targetPrice}. ${alert.direction === "above" ? "Consider taking profit." : "Consider your stop-loss plan."}`;
+        NotificationSystem.send(title, body);
+        this.markTriggered(alert.id);
+        fired++;
+      }
+    });
+    return fired;
+  },
+  getActive() { return this.load().filter(a => !a.triggered); },
+  getAll() { return this.load(); },
 };
 
 // ─── TECHNICAL ANALYSIS ENGINE ─────────────────────────────────────────────────
@@ -1145,6 +1245,87 @@ function GoalPlanner({ onAsk }) {
   );
 }
 
+// ─── PRICE ALERTS PANEL ───────────────────────────────────────────────────────
+function PriceAlertsPanel({ onClose }) {
+  const [alerts, setAlerts] = useState(() => PriceAlertManager.getAll());
+  const [form, setForm] = useState({ symbol: "", targetPrice: "", direction: "above" });
+  const [err, setErr] = useState("");
+
+  const refresh = () => setAlerts(PriceAlertManager.getAll());
+
+  const add = () => {
+    setErr("");
+    if (!form.symbol.trim()) return setErr("Enter a ticker symbol");
+    if (!form.targetPrice || isNaN(+form.targetPrice) || +form.targetPrice <= 0) return setErr("Enter a valid price");
+    PriceAlertManager.add(form.symbol, form.targetPrice, form.direction);
+    setForm({ symbol: "", targetPrice: "", direction: "above" });
+    refresh();
+  };
+
+  const remove = (id) => { PriceAlertManager.remove(id); refresh(); };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", zIndex: 100, display: "flex", flexDirection: "column", justifyContent: "flex-end" }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: "#1C1C1E", borderTop: `0.5px solid ${T.borderStrong}`, borderRadius: "20px 20px 0 0", padding: "20px 20px 40px", maxHeight: "80vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Price Alerts</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Get notified when a stock hits your target</div>
+          </div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: "50%", width: 30, height: 30, color: T.textMuted, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+        </div>
+
+        {/* Add Alert Form */}
+        <div style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: 14, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>TICKER</div>
+              <input value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} placeholder="AAPL" style={{ width: "100%", background: "rgba(0,0,0,0.3)", border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.sm, padding: "8px 10px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>TARGET PRICE ($)</div>
+              <input value={form.targetPrice} onChange={e => setForm(f => ({ ...f, targetPrice: e.target.value }))} placeholder="195.00" type="number" style={{ width: "100%", background: "rgba(0,0,0,0.3)", border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.sm, padding: "8px 10px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 4 }}>DIRECTION</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {["above", "below"].map(d => (
+                <button key={d} onClick={() => setForm(f => ({ ...f, direction: d }))} style={{ flex: 1, padding: "7px 0", borderRadius: T.radius.sm, border: `0.5px solid ${form.direction === d ? T.goldBorder : T.border}`, background: form.direction === d ? T.goldDim : "transparent", color: form.direction === d ? T.gold : T.textMuted, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: T.font, textTransform: "capitalize" }}>
+                  {d === "above" ? "📈 Goes Above" : "📉 Drops Below"}
+                </button>
+              ))}
+            </div>
+          </div>
+          {err && <div style={{ fontSize: 11, color: T.red, marginBottom: 8 }}>{err}</div>}
+          <button onClick={add} style={{ width: "100%", padding: "10px 0", borderRadius: T.radius.sm, border: "none", background: `linear-gradient(145deg, ${T.gold}, #8b5e12)`, color: "#000", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: T.font }}>
+            Set Alert
+          </button>
+        </div>
+
+        {/* Existing Alerts */}
+        {alerts.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "20px", color: T.textMuted, fontSize: 13 }}>No alerts set yet</div>
+        ) : (
+          alerts.map(a => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: a.triggered ? "rgba(48,209,88,0.06)" : T.card, border: `0.5px solid ${a.triggered ? T.greenBorder : T.border}`, borderRadius: T.radius.sm, marginBottom: 8 }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{a.symbol}</span>
+                  <span style={{ fontSize: 10, color: T.textMuted, background: "rgba(255,255,255,0.06)", padding: "2px 7px", borderRadius: T.radius.pill }}>{a.direction === "above" ? "↑ above" : "↓ below"} ${a.targetPrice}</span>
+                  {a.triggered && <span style={{ fontSize: 10, color: T.green, fontWeight: 600 }}>✓ FIRED</span>}
+                </div>
+                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>Set {new Date(a.createdAt).toLocaleDateString()}{a.triggeredAt ? ` · Triggered ${new Date(a.triggeredAt).toLocaleTimeString()}` : ""}</div>
+              </div>
+              <button onClick={() => remove(a.id)} style={{ background: T.redDim, border: `0.5px solid ${T.redBorder}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.red, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>Remove</button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── PORTFOLIO TAB ────────────────────────────────────────────────────────────
 function PortfolioTab({ onAsk }) {
   const [positions, setPositions] = useState(() => {
@@ -1400,10 +1581,28 @@ export default function ATLASv4() {
   const [notifGranted, setNotifGranted] = useState(false);
   const [agentActive, setAgentActive] = useState({ intel: false, market: false });
   const [favorites, setFavorites] = useState(() => { try { return JSON.parse(localStorage.getItem("atlas_favorites") || "[]"); } catch { return []; } });
+  const [showAlerts, setShowAlerts] = useState(false);
+  const [activeAlertCount, setActiveAlertCount] = useState(() => PriceAlertManager.getActive().length);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => { NotificationSystem.requestPermission().then(setNotifGranted); }, []);
+
+  // Poll price alerts every 30s
+  useEffect(() => {
+    const poll = () => {
+      if (!marketData) return;
+      const prices = {};
+      if (marketData.spy?.c) prices.SPY = marketData.spy.c;
+      if (marketData.qqq?.c) prices.QQQ = marketData.qqq.c;
+      if (marketData.voo?.c) prices.VOO = marketData.voo.c;
+      PriceAlertManager.check(prices);
+      setActiveAlertCount(PriceAlertManager.getActive().length);
+    };
+    poll();
+    const t = setInterval(poll, 30_000);
+    return () => clearInterval(t);
+  }, [marketData]);
 
   const toggleFav = useCallback((symbol) => {
     setFavorites(prev => {
@@ -1460,6 +1659,12 @@ export default function ATLASv4() {
   const sendMessage = useCallback(async (text) => {
     const raw = text || input.trim();
     if (!raw || loading) return;
+
+    if (!SecurityAgent.checkRateLimit()) {
+      setMessages(prev => [...prev, { role: "assistant", content: "⚠️ Rate limit reached (20 requests/min). Please wait a moment before asking again.", isError: true }]);
+      return;
+    }
+
     const userText = SecurityAgent.sanitize(raw);
     setInput("");
     const newMessages = [...messages, { role: "user", content: userText }];
@@ -1474,46 +1679,59 @@ export default function ATLASv4() {
       const snapshot = MarketAgent.formatForAI(marketData);
       const watchlistContext = favorites.length > 0 ? `User's watchlist: ${favorites.join(", ")}` : "";
       const apiMsgs = newMessages.map(m => ({ role: m.role, content: m.content }));
+      const body = JSON.stringify({ messages: apiMsgs, systemPrompt: buildPrompt(snapshot, watchlistContext) });
 
-      const res = await fetch(`${API_BASE}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: apiMsgs,
-          systemPrompt: buildPrompt(snapshot, watchlistContext),
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(err.error || `HTTP ${res.status}`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
       let fullText = "";
-      let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.error) throw new Error(data.error);
-            if (data.content) {
-              fullText += data.content;
-              setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: "assistant", content: fullText }; return u; });
-            }
-          } catch (parseErr) {
-            if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
+      await ErrorRecoveryAgent.withRetry(
+        async (attempt) => {
+          const res = await fetch(`${API_BASE}/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          });
+
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+            throw new Error(errData.error || `HTTP ${res.status}`);
           }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          fullText = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (!SecurityAgent.validateApiResponse(data)) continue;
+                if (data.error) throw new Error(data.error);
+                if (data.content) {
+                  fullText += data.content;
+                  setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: "assistant", content: fullText }; return u; });
+                }
+              } catch (parseErr) {
+                if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
+              }
+            }
+          }
+        },
+        (attempt, delayMs) => {
+          const sec = (delayMs / 1000).toFixed(1);
+          setMessages(prev => {
+            const u = [...prev];
+            u[u.length - 1] = { role: "assistant", content: `⟳ Retrying… (attempt ${attempt + 1}/${ErrorRecoveryAgent.MAX_RETRIES}, waiting ${sec}s)`, typing: true };
+            return u;
+          });
         }
-      }
+      );
 
       const lower = fullText.toLowerCase();
       if (lower.includes("sell") && lower.includes("recommend")) {
@@ -1528,7 +1746,8 @@ export default function ATLASv4() {
       setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: "assistant", content: fullText || "No response." }; return u; });
     } catch (err) {
       SecurityAgent.logEvent("ERROR", err.message);
-      setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: "assistant", content: `Error: ${err.message}` }; return u; });
+      const friendly = ErrorRecoveryAgent.friendlyMessage(err);
+      setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: "assistant", content: friendly, isError: true, retryText: raw }; return u; });
     }
     setLoading(false);
     setAgentActive(s => ({ ...s, intel: false }));
@@ -1572,10 +1791,18 @@ export default function ATLASv4() {
             <div style={{ fontSize: 10, color: T.textMuted }}>Financial Intelligence · Gemini AI</div>
           </div>
         </div>
-        <div style={{ display: "flex", background: "rgba(118,118,128,0.18)", borderRadius: T.radius.sm, padding: 2, gap: 1 }}>
-          {TABS.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)} style={{ padding: "5px 10px", borderRadius: T.radius.xs, fontSize: 11, fontWeight: tab === t.id ? 600 : 400, color: tab === t.id ? T.text : T.textMuted, background: tab === t.id ? "rgba(255,255,255,0.14)" : "transparent", border: "none", cursor: "pointer", boxShadow: tab === t.id ? "0 1px 4px rgba(0,0,0,0.5)" : "none", transition: "all 0.18s ease", whiteSpace: "nowrap" }}>{t.label}</button>
-          ))}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button onClick={() => setShowAlerts(true)} style={{ position: "relative", background: activeAlertCount > 0 ? T.goldDim : "rgba(255,255,255,0.06)", border: `0.5px solid ${activeAlertCount > 0 ? T.goldBorder : T.border}`, borderRadius: T.radius.xs, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 15, flexShrink: 0 }}>
+            🔔
+            {activeAlertCount > 0 && (
+              <div style={{ position: "absolute", top: -4, right: -4, background: T.red, borderRadius: "50%", width: 14, height: 14, fontSize: 9, fontWeight: 700, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>{activeAlertCount}</div>
+            )}
+          </button>
+          <div style={{ display: "flex", background: "rgba(118,118,128,0.18)", borderRadius: T.radius.sm, padding: 2, gap: 1 }}>
+            {TABS.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)} style={{ padding: "5px 10px", borderRadius: T.radius.xs, fontSize: 11, fontWeight: tab === t.id ? 600 : 400, color: tab === t.id ? T.text : T.textMuted, background: tab === t.id ? "rgba(255,255,255,0.14)" : "transparent", border: "none", cursor: "pointer", boxShadow: tab === t.id ? "0 1px 4px rgba(0,0,0,0.5)" : "none", transition: "all 0.18s ease", whiteSpace: "nowrap" }}>{t.label}</button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -1585,8 +1812,9 @@ export default function ATLASv4() {
           { label: "Gemini AI", color: T.gold, active: agentActive.intel },
           { label: "Market Feed", color: T.green, active: agentActive.market || marketLoading },
           { label: "Technicals", color: T.indigo, active: !!(marketData?.technicals?.SPY) },
-          { label: "Security", color: "#8E9CF0", active: true },
-          { label: notifGranted ? "Alerts On" : "Enable Alerts", color: notifGranted ? T.green : T.red, active: notifGranted, onClick: !notifGranted ? () => NotificationSystem.requestPermission().then(setNotifGranted) : undefined },
+          { label: "Security Guardian", color: "#8E9CF0", active: true },
+          { label: "Error Recovery", color: "#5E9CF0", active: true },
+          { label: notifGranted ? `Alerts (${activeAlertCount})` : "Enable Alerts", color: notifGranted ? T.green : T.red, active: notifGranted, onClick: !notifGranted ? () => NotificationSystem.requestPermission().then(setNotifGranted) : () => setShowAlerts(true) },
         ].map(a => (
           <div key={a.label} onClick={a.onClick} style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: T.radius.pill, border: `0.5px solid ${a.active ? `${a.color}30` : "rgba(255,255,255,0.04)"}`, background: a.active ? `${a.color}0D` : "transparent", cursor: a.onClick ? "pointer" : "default", flexShrink: 0, transition: "all 0.25s ease" }}>
             <div style={{ width: 5, height: 5, borderRadius: "50%", background: a.active ? a.color : "rgba(255,255,255,0.1)", boxShadow: a.active ? `0 0 6px ${a.color}` : "none", animation: a.active ? "pulse 2.5s ease infinite" : "none" }} />
@@ -1642,11 +1870,22 @@ export default function ATLASv4() {
                   )}
                   {msg.typing ? (
                     <div style={{ display: "flex", alignItems: "center", gap: 5, background: T.card, border: `0.5px solid ${T.border}`, borderRadius: "4px 16px 16px 16px", padding: "12px 16px", marginLeft: 32 }}>
-                      {[0, 1, 2].map(j => <div key={j} style={{ width: 6, height: 6, borderRadius: "50%", background: T.gold, animation: `pulse 1.4s ease ${j * 0.18}s infinite` }} />)}
+                      {msg.content ? (
+                        <span style={{ fontSize: 12, color: T.gold }}>{msg.content}</span>
+                      ) : (
+                        [0, 1, 2].map(j => <div key={j} style={{ width: 6, height: 6, borderRadius: "50%", background: T.gold, animation: `pulse 1.4s ease ${j * 0.18}s infinite` }} />)
+                      )}
                     </div>
                   ) : (
-                    <div style={{ maxWidth: "85%", padding: "11px 14px", borderRadius: isUser ? "16px 16px 4px 16px" : i === 0 ? "16px 16px 16px 4px" : "4px 16px 16px 16px", background: isUser ? T.goldDim : T.card, border: `0.5px solid ${isUser ? T.goldBorder : T.border}`, boxShadow: "0 1px 6px rgba(0,0,0,0.25)", fontSize: 14, lineHeight: 1.65, color: T.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                      {msg.content}
+                    <div style={{ maxWidth: "85%" }}>
+                      <div style={{ padding: "11px 14px", borderRadius: isUser ? "16px 16px 4px 16px" : i === 0 ? "16px 16px 16px 4px" : "4px 16px 16px 16px", background: isUser ? T.goldDim : msg.isError ? "rgba(255,69,58,0.08)" : T.card, border: `0.5px solid ${isUser ? T.goldBorder : msg.isError ? T.redBorder : T.border}`, boxShadow: "0 1px 6px rgba(0,0,0,0.25)", fontSize: 14, lineHeight: 1.65, color: msg.isError ? T.red : T.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                        {msg.content}
+                      </div>
+                      {msg.isError && msg.retryText && (
+                        <button onClick={() => sendMessage(msg.retryText)} style={{ marginTop: 6, padding: "6px 14px", borderRadius: T.radius.pill, border: `0.5px solid ${T.goldBorder}`, background: T.goldDim, color: T.gold, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: T.font }}>
+                          ↺ Retry
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1776,6 +2015,8 @@ export default function ATLASv4() {
           </div>
         </div>
       )}
+
+      {showAlerts && <PriceAlertsPanel onClose={() => { setShowAlerts(false); setActiveAlertCount(PriceAlertManager.getActive().length); }} />}
     </div>
   );
 }
