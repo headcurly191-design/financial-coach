@@ -23,10 +23,16 @@ router.post("/chat", async (req, res) => {
       systemInstruction: systemPrompt || "",
     });
 
-    const history = messages.slice(0, -1).map((m: any) => ({
+    const historyRaw = messages.slice(0, -1).map((m: any) => ({
       role: m.role === "assistant" ? "model" : "user",
       parts: [{ text: String(m.content || "") }],
     }));
+    // Gemini requires history to start with a "user" turn — drop any leading model messages
+    let startIdx = 0;
+    while (startIdx < historyRaw.length && historyRaw[startIdx].role !== "user") {
+      startIdx++;
+    }
+    const history = historyRaw.slice(startIdx);
 
     const lastMessage = messages[messages.length - 1];
 

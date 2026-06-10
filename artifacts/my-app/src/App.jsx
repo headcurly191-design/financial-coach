@@ -947,7 +947,7 @@ function PredictionChart({ prediction, symbol }) {
 }
 
 // ─── ENHANCED MARKET CARD ──────────────────────────────────────────────────────
-function MarketCard({ label, quote, signal, tech, isCrypto, isFavorite, onToggleFav, onAsk }) {
+function MarketCard({ label, quote, signal, tech, isCrypto, isFavorite, onToggleFav, onAsk, onCardClick }) {
   const [expanded, setExpanded] = useState(false);
   const [showChart, setShowChart] = useState(false);
 
