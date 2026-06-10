@@ -500,6 +500,22 @@ const SignalEngine = {
   },
 };
 
+// ─── RECOMMENDED AMOUNT ENGINE ────────────────────────────────────────────────
+const calcRecommendedAmount = (signal, tech, quote, budget = 1000) => {
+  if (!signal || !quote?.c) return null;
+  const riskFactor = { Low: 0.25, Medium: 0.18, High: 0.12, "Very High": 0.07 };
+  const risk = signal?.risk?.level || "Medium";
+  const pct = riskFactor[risk] ?? 0.15;
+  const conf = (tech?.confidence || 55) / 100;
+  const adjPct = Math.min(pct * (1 + conf * 0.25), 0.25);
+  const price = quote.c;
+  const shares = Math.max(1, Math.floor((budget * adjPct) / price));
+  const amount = Math.round(shares * price);
+  const projectedProfit = signal.sellAt ? (signal.sellAt - price) * shares : null;
+  const projectedPct = signal.sellAt ? ((signal.sellAt - price) / price * 100) : null;
+  return { amount, shares, projectedProfit, projectedPct, budgetPct: Math.round(adjPct * 100) };
+};
+
 // ─── MARKET AGENT ──────────────────────────────────────────────────────────────
 const MarketAgent = {
   cache: {}, data: null, signals: [],
@@ -975,19 +991,36 @@ function MarketCard({ label, quote, signal, tech, isCrypto, isFavorite, onToggle
         {tech && <ConfidenceBar value={tech.confidence} color={tech.compositeSignal === "BULLISH" ? T.green : tech.compositeSignal === "BEARISH" ? T.red : T.gold} />}
 
         {/* BUY signal details */}
-        {signal?.signal === "BUY" && signal.sellAt && (
-          <div style={{ marginTop: 10, background: T.greenDim, border: `0.5px solid ${T.greenBorder}`, borderRadius: T.radius.sm, padding: "8px 12px" }}>
-            <div style={{ fontSize: 11, color: T.green, fontWeight: 600, marginBottom: 4 }}>▲ BUY GUIDANCE</div>
-            <div style={{ fontSize: 11, color: T.textSub, display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <span>Buy at: <b style={{ color: T.green }}>${signal.buyAt?.toFixed(2)}</b></span>
-              <span>Target: <b style={{ color: T.gold }}>${signal.sellAt?.toFixed(2)}</b></span>
-              {signal.holdDays && <span>Hold: <b style={{ color: T.textSub }}>{signal.holdDays}d</b></span>}
+        {signal?.signal === "BUY" && signal.sellAt && (() => {
+          const rec = calcRecommendedAmount(signal, tech, quote);
+          return (
+            <div style={{ marginTop: 10, background: T.greenDim, border: `0.5px solid ${T.greenBorder}`, borderRadius: T.radius.sm, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11, color: T.green, fontWeight: 600, marginBottom: 6 }}>▲ BUY SIGNAL</div>
+              <div style={{ fontSize: 11, color: T.textSub, display: "flex", gap: 12, flexWrap: "wrap", marginBottom: rec ? 8 : 0 }}>
+                <span>Entry: <b style={{ color: T.green }}>${signal.buyAt?.toFixed(2)}</b></span>
+                <span>Target: <b style={{ color: T.gold }}>${signal.sellAt?.toFixed(2)}</b></span>
+                {signal.holdDays && <span>Hold: <b style={{ color: T.textSub }}>{signal.holdDays}d</b></span>}
+              </div>
+              {rec && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(0,0,0,0.2)", borderRadius: T.radius.xs, padding: "7px 10px", marginTop: 4 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.06em" }}>Recommended amount</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>${rec.amount.toLocaleString()} <span style={{ fontSize: 10, color: T.textMuted, fontWeight: 400 }}>~{rec.shares} share{rec.shares !== 1 ? "s" : ""}</span></div>
+                  </div>
+                  {rec.projectedProfit && (
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.06em" }}>Est. profit</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>+${rec.projectedProfit.toFixed(0)}</div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
         {signal?.signal === "SELL" && signal.buyAt && (
           <div style={{ marginTop: 10, background: T.redDim, border: `0.5px solid ${T.redBorder}`, borderRadius: T.radius.sm, padding: "8px 12px" }}>
-            <div style={{ fontSize: 11, color: T.red, fontWeight: 600, marginBottom: 4 }}>▼ SELL GUIDANCE</div>
+            <div style={{ fontSize: 11, color: T.red, fontWeight: 600, marginBottom: 4 }}>▼ SELL SIGNAL</div>
             <div style={{ fontSize: 11, color: T.textSub }}>
               Exit at: <b style={{ color: T.red }}>${signal.sellAt?.toFixed(2)}</b> · Re-enter near: <b style={{ color: T.gold }}>${signal.buyAt?.toFixed(2)}</b>
             </div>
@@ -995,19 +1028,19 @@ function MarketCard({ label, quote, signal, tech, isCrypto, isFavorite, onToggle
         )}
 
         <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+          {onCardClick && (
+            <button onClick={() => onCardClick({ symbol: sym, quote, signal, tech, isFavorite })} style={{ flex: 2, background: signal?.signal === "BUY" ? T.greenDim : signal?.signal === "SELL" ? T.redDim : "rgba(255,255,255,0.06)", border: `0.5px solid ${signal?.signal === "BUY" ? T.greenBorder : signal?.signal === "SELL" ? T.redBorder : T.border}`, borderRadius: T.radius.xs, padding: "7px 0", color: signal?.signal === "BUY" ? T.green : signal?.signal === "SELL" ? T.red : T.textMuted, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: T.font }}>
+              View Full Details →
+            </button>
+          )}
           {prediction && (
-            <button onClick={() => setShowChart(e => !e)} style={{ flex: 1, background: showChart ? T.indigoDim : "rgba(255,255,255,0.04)", border: `0.5px solid ${showChart ? T.indigoBorder : T.border}`, borderRadius: T.radius.xs, padding: "6px 0", color: showChart ? T.indigo : T.textMuted, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>
-              {showChart ? "Hide" : "📈 Prediction"}
+            <button onClick={() => setShowChart(e => !e)} style={{ flex: 1, background: showChart ? T.indigoDim : "rgba(255,255,255,0.04)", border: `0.5px solid ${showChart ? T.indigoBorder : T.border}`, borderRadius: T.radius.xs, padding: "7px 0", color: showChart ? T.indigo : T.textMuted, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>
+              {showChart ? "Hide" : "📈"}
             </button>
           )}
-          <button onClick={() => setExpanded(e => !e)} style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: `0.5px solid ${T.border}`, borderRadius: T.radius.xs, padding: "6px 0", color: T.textMuted, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>
-            {expanded ? "Hide" : "📊 Technicals"}
+          <button onClick={() => setExpanded(e => !e)} style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: `0.5px solid ${T.border}`, borderRadius: T.radius.xs, padding: "7px 0", color: T.textMuted, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>
+            {expanded ? "▲" : "📊"}
           </button>
-          {onAsk && (
-            <button onClick={() => onAsk(`Analyze ${sym} — give me a detailed buy/sell/hold recommendation with exact entry, target, and risk assessment`)} style={{ flex: 1, background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "6px 0", color: T.gold, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>
-              Ask ATLAS
-            </button>
-          )}
         </div>
       </div>
 
@@ -1072,8 +1105,199 @@ function AnalystCard({ symbol, rec }) {
   );
 }
 
+// ─── STOCK DETAIL MODAL ────────────────────────────────────────────────────────
+function StockDetailModal({ symbol, quote, signal, tech, isFavorite, onToggleFav, onAsk, onClose }) {
+  const [showChart, setShowChart] = useState(false);
+  if (!quote || !symbol) return null;
+
+  const price = quote.c || 0;
+  const chg = quote.pc ? ((price - quote.pc) / quote.pc * 100) : 0;
+  const rec = signal ? calcRecommendedAmount(signal, tech, quote) : null;
+  const decision = signal?.signal || "WATCH";
+  const risk = signal?.risk;
+  const prediction = tech?.prediction;
+
+  const DC = {
+    BUY:   { icon: "▲", label: "BUY",   bg: T.greenDim,  border: T.greenBorder,  color: T.green,  desc: "Strong buy signal — conditions are favorable" },
+    SELL:  { icon: "▼", label: "SELL",  bg: T.redDim,    border: T.redBorder,    color: T.red,    desc: "Consider selling or reducing position" },
+    HOLD:  { icon: "◆", label: "HOLD",  bg: T.goldDim,   border: T.goldBorder,   color: T.gold,   desc: "Hold current position — no clear entry yet" },
+    WATCH: { icon: "◉", label: "WATCH", bg: T.orangeDim, border: T.orangeBorder, color: T.orange, desc: "Monitor closely — entry opportunity forming" },
+  };
+  const dc = DC[decision] || DC.HOLD;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.82)", backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)", zIndex: 200, display: "flex", flexDirection: "column", justifyContent: "flex-end" }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: "#0a0a0a", borderTop: `0.5px solid ${T.borderStrong}`, borderRadius: "24px 24px 0 0", padding: "20px 20px 48px", maxHeight: "92vh", overflowY: "auto" }}>
+
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+              <span style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{symbol}</span>
+              {onToggleFav && (
+                <button onClick={() => onToggleFav(symbol)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: isFavorite ? T.gold : "rgba(255,255,255,0.18)", transition: "all 0.2s" }}>
+                  {isFavorite ? "★" : "☆"}
+                </button>
+              )}
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <span style={{ fontSize: 34, fontWeight: 700, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em" }}>
+                ${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+              <span style={{ fontSize: 14, color: chg >= 0 ? T.green : T.red, fontWeight: 600 }}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}%</span>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: "50%", width: 32, height: 32, color: T.textMuted, fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+        </div>
+
+        {/* ATLAS Decision */}
+        <div style={{ background: dc.bg, border: `1px solid ${dc.border}`, borderRadius: T.radius.lg, padding: "16px 18px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 9, color: dc.color, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 5 }}>ATLAS DECISION</div>
+            <div style={{ fontSize: 30, fontWeight: 800, color: dc.color, letterSpacing: "-0.01em" }}>{dc.icon} {dc.label}</div>
+            <div style={{ fontSize: 11, color: T.textSub, marginTop: 3 }}>{dc.desc}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 4 }}>CONFIDENCE</div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: dc.color }}>{signal?.strength || "—"}%</div>
+          </div>
+        </div>
+
+        {/* Stats Grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+          <div style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: "12px 14px" }}>
+            <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>RISK LEVEL</div>
+            {risk ? (
+              <>
+                <div style={{ fontSize: 15, fontWeight: 700, color: risk.color }}>{risk.level}</div>
+                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2, lineHeight: 1.4 }}>{risk.detail}</div>
+              </>
+            ) : <div style={{ fontSize: 12, color: T.textMuted }}>Calculating…</div>}
+          </div>
+          <div style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: "12px 14px" }}>
+            <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>HOLD TIME</div>
+            {signal?.holdDays ? (
+              <>
+                <div style={{ fontSize: 15, fontWeight: 700, color: T.gold }}>{signal.holdDays} days</div>
+                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>Est. hold period</div>
+              </>
+            ) : <div style={{ fontSize: 12, color: T.textMuted }}>N/A</div>}
+          </div>
+          <div style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: "12px 14px" }}>
+            <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>{decision === "BUY" ? "ENTRY → TARGET" : "EXIT → RE-ENTRY"}</div>
+            {signal?.buyAt && signal?.sellAt ? (
+              <div style={{ fontSize: 12, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                <span style={{ color: T.green }}>${signal.buyAt.toFixed(2)}</span>
+                <span style={{ color: T.textMuted }}> → </span>
+                <span style={{ color: T.gold }}>${signal.sellAt.toFixed(2)}</span>
+              </div>
+            ) : <div style={{ fontSize: 12, color: T.textMuted }}>No target set</div>}
+          </div>
+          <div style={{ background: decision === "BUY" ? T.greenDim : T.card, border: `0.5px solid ${decision === "BUY" ? T.greenBorder : T.border}`, borderRadius: T.radius.md, padding: "12px 14px" }}>
+            <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>RECOMMENDED</div>
+            {rec ? (
+              <>
+                <div style={{ fontSize: 15, fontWeight: 700, color: decision === "BUY" ? T.green : T.textSub, fontVariantNumeric: "tabular-nums" }}>${rec.amount.toLocaleString()}</div>
+                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>~{rec.shares} share{rec.shares !== 1 ? "s" : ""} · {rec.budgetPct}% of $1k</div>
+              </>
+            ) : <div style={{ fontSize: 12, color: T.textMuted }}>N/A</div>}
+          </div>
+        </div>
+
+        {/* Projected Profit */}
+        {rec?.projectedProfit && decision === "BUY" && (
+          <div style={{ background: `linear-gradient(135deg, ${T.greenDim}, rgba(0,0,0,0))`, border: `0.5px solid ${T.greenBorder}`, borderRadius: T.radius.md, padding: "13px 16px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 9, color: T.green, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2 }}>PROJECTED PROFIT</div>
+              <div style={{ fontSize: 11, color: T.textSub }}>If target ${signal.sellAt?.toFixed(2)} is hit in ~{signal.holdDays}d</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 24, fontWeight: 800, color: T.green, fontVariantNumeric: "tabular-nums" }}>+${rec.projectedProfit.toFixed(2)}</div>
+              <div style={{ fontSize: 11, color: T.green }}>+{rec.projectedPct?.toFixed(1)}%</div>
+            </div>
+          </div>
+        )}
+
+        {/* Confidence Bar */}
+        {tech && <ConfidenceBar value={tech.confidence} color={dc.color} />}
+
+        {/* Current Trends */}
+        {tech && (
+          <div style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: "14px", marginBottom: 12, marginTop: 14 }}>
+            <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>Current Trends</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {tech.rsi !== null && (
+                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: T.radius.xs, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>RSI</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: tech.rsi < 30 ? T.green : tech.rsi > 70 ? T.red : T.gold }}>{tech.rsi.toFixed(0)} — {tech.rsi < 30 ? "↑ Oversold" : tech.rsi > 70 ? "↓ Overbought" : "Neutral"}</div>
+                </div>
+              )}
+              {tech.macd && (
+                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: T.radius.xs, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>MACD</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: tech.macd.bullish ? T.green : T.red }}>{tech.macd.bullish ? "▲ Bullish" : "▼ Bearish"}</div>
+                </div>
+              )}
+              {tech.ch30 !== null && (
+                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: T.radius.xs, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>30-Day</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: tech.ch30 >= 0 ? T.green : T.red }}>{tech.ch30 >= 0 ? "+" : ""}{tech.ch30.toFixed(1)}%</div>
+                </div>
+              )}
+              {tech.ch90 !== null && (
+                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: T.radius.xs, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>90-Day</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: tech.ch90 >= 0 ? T.green : T.red }}>{tech.ch90 >= 0 ? "+" : ""}{tech.ch90.toFixed(1)}%</div>
+                </div>
+              )}
+              {tech.sma50 && (
+                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: T.radius.xs, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>50-MA</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: tech.cur > tech.sma50 ? T.green : T.red }}>{tech.cur > tech.sma50 ? "Above ✓" : "Below ✗"} ${tech.sma50.toFixed(0)}</div>
+                </div>
+              )}
+              {tech.sma200 && (
+                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: T.radius.xs, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 2 }}>200-MA</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: tech.cur > tech.sma200 ? T.green : T.red }}>{tech.cur > tech.sma200 ? "Above ✓" : "Below ✗"} ${tech.sma200.toFixed(0)}</div>
+                </div>
+              )}
+            </div>
+            {tech.patterns.length > 0 && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: `0.5px solid ${T.sep}` }}>
+                <div style={{ fontSize: 9, color: T.textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Patterns Detected</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {tech.patterns.map((p, i) => {
+                    const c = p.type === "bullish" ? T.green : p.type === "bearish" ? T.red : T.gold;
+                    return <span key={i} style={{ fontSize: 10, color: c, background: `${c}15`, border: `0.5px solid ${c}40`, borderRadius: T.radius.pill, padding: "2px 8px" }}>{p.name}</span>;
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 30-Day Prediction */}
+        {prediction && (
+          <>
+            <button onClick={() => setShowChart(e => !e)} style={{ width: "100%", padding: "9px", borderRadius: T.radius.sm, border: `0.5px solid ${showChart ? T.indigoBorder : T.border}`, background: showChart ? T.indigoDim : "rgba(255,255,255,0.04)", color: showChart ? T.indigo : T.textMuted, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: T.font, marginBottom: showChart ? 12 : 14 }}>
+              {showChart ? "▲ Hide Chart" : "📈 30-Day Monte Carlo Prediction"}
+            </button>
+            {showChart && <div style={{ marginBottom: 14 }}><PredictionChart prediction={prediction} symbol={symbol} /></div>}
+          </>
+        )}
+
+        <button onClick={() => { onAsk(`Deep analysis of ${symbol} at $${price.toFixed(2)} (${chg >= 0 ? "+" : ""}${chg.toFixed(2)}% today). Is it a BUY or PASS right now? Give me: exact entry price, sell target, stop-loss, risk level, confidence %, how much to invest, hold time, and projected profit.`); onClose(); }}
+          style={{ width: "100%", padding: "14px", borderRadius: T.radius.md, border: "none", background: `linear-gradient(145deg, ${T.gold}, #8b5e12)`, color: "#000", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: T.font }}>
+          Ask ATLAS for Full Analysis
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── WATCHLIST TAB ─────────────────────────────────────────────────────────────
-function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
+function WatchlistTab({ favorites, onToggleFav, onAsk, onCardClick, marketData }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -1115,18 +1339,94 @@ function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
     load();
   }, [favorites]);
 
+  const [portfolio, setPortfolio] = useState(() => { try { return JSON.parse(localStorage.getItem("atlas_portfolio") || "[]"); } catch { return []; } });
+  const [portfolioData, setPortfolioData] = useState({});
+
+  // Load live data for portfolio positions
+  useEffect(() => {
+    if (portfolio.length === 0) return;
+    const syms = [...new Set(portfolio.map(p => p.symbol))];
+    Promise.all(syms.map(async sym => {
+      try {
+        const [quote, candles] = await Promise.all([MarketAgent.fetchQuoteAny(sym), HistoricalAgent.fetchCandles(sym)]);
+        const tech = HistoricalAgent.computeTechnicals(candles);
+        const signal = SignalEngine.analyze(quote, sym, tech);
+        return [sym, { quote, tech, signal }];
+      } catch { return [sym, null]; }
+    })).then(entries => {
+      const map = {};
+      entries.forEach(([sym, d]) => { if (d) map[sym] = d; });
+      setPortfolioData(map);
+    });
+  }, [portfolio]);
+
+  const totalCost = portfolio.reduce((s, p) => s + p.shares * p.avgPrice, 0);
+  const totalCurrent = portfolio.reduce((s, p) => {
+    const price = portfolioData[p.symbol]?.quote?.c;
+    return price ? s + p.shares * price : s;
+  }, 0);
+  const totalPnl = totalCurrent > 0 ? totalCurrent - totalCost : null;
+  const totalPnlPct = totalPnl !== null && totalCost > 0 ? (totalPnl / totalCost) * 100 : null;
+
   return (
     <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 32px" }}>
-      {/* Search */}
+
+      {/* ── MY PORTFOLIO ── */}
+      {portfolio.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em" }}>My Portfolio</div>
+            {totalPnl !== null && (
+              <div style={{ fontSize: 12, fontWeight: 600, color: totalPnl >= 0 ? T.green : T.red }}>
+                {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)} ({totalPnlPct >= 0 ? "+" : ""}{totalPnlPct?.toFixed(2)}%)
+              </div>
+            )}
+          </div>
+          <div style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, overflow: "hidden", marginBottom: 10 }}>
+            {portfolio.map((pos, i) => {
+              const d = portfolioData[pos.symbol] || {};
+              const curPrice = d.quote?.c;
+              const pnl = curPrice ? (curPrice - pos.avgPrice) * pos.shares : null;
+              const pnlPct = pnl !== null ? (pnl / (pos.avgPrice * pos.shares)) * 100 : null;
+              const sig = d.signal;
+              return (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", borderBottom: i < portfolio.length - 1 ? `0.5px solid ${T.sep}` : "none", cursor: onCardClick ? "pointer" : "default" }}
+                  onClick={() => onCardClick && d.quote && onCardClick({ symbol: pos.symbol, quote: d.quote, signal: sig, tech: d.tech, isFavorite: favorites.includes(pos.symbol) })}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{pos.symbol}</span>
+                      {sig && <SignalPill signal={sig.signal} strength={sig.strength} small />}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.textMuted }}>{pos.shares} shares · avg ${pos.avgPrice.toFixed(2)}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    {curPrice ? (
+                      <>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums" }}>${(curPrice * pos.shares).toFixed(2)}</div>
+                        <div style={{ fontSize: 11, color: pnl >= 0 ? T.green : T.red, fontVariantNumeric: "tabular-nums" }}>{pnl >= 0 ? "+" : ""}${pnl?.toFixed(2)} ({pnlPct >= 0 ? "+" : ""}{pnlPct?.toFixed(1)}%)</div>
+                      </>
+                    ) : <div style={{ fontSize: 12, color: T.textMuted }}>…</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => onAsk(`Analyze my portfolio performance and give me specific buy/sell/hold recommendations for each position: ${portfolio.map(p => `${p.symbol} (${p.shares} shares at $${p.avgPrice})`).join(", ")}`)}
+              style={{ flex: 1, background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "8px", color: T.gold, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: T.font }}>Ask ATLAS to Review Portfolio</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── SEARCH ── */}
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>Search Any Stock</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", background: T.card, border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.md, padding: "10px 14px" }}>
           <span style={{ fontSize: 14, color: T.textMuted }}>🔍</span>
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search by name or ticker (e.g. AAPL, Tesla)" style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: T.text, fontSize: 14, fontFamily: T.font }} />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search by ticker or name (e.g. AAPL, Tesla)" style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: T.text, fontSize: 14, fontFamily: T.font }} />
           {searching && <span style={{ fontSize: 10, color: T.textMuted, animation: "pulse 1s ease infinite" }}>…</span>}
           {query && <button onClick={() => { setQuery(""); setResults([]); }} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 16 }}>×</button>}
         </div>
-
         {results.length > 0 && (
           <div style={{ background: T.cardHigh, border: `0.5px solid ${T.borderStrong}`, borderRadius: T.radius.md, marginTop: 4, overflow: "hidden" }}>
             {results.map((r, i) => {
@@ -1138,8 +1438,10 @@ function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
                     <span style={{ fontSize: 12, color: T.textSub }}>{r.name}</span>
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => onAsk(`Analyze ${r.symbol} (${r.name}) — give me buy/sell/hold recommendation with entry price, target, confidence level, and risk assessment`)} style={{ background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.gold, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>Ask ATLAS</button>
-                    <button onClick={() => { onToggleFav(r.symbol); }} style={{ background: isFav ? T.goldDim : "rgba(255,255,255,0.05)", border: `0.5px solid ${isFav ? T.goldBorder : T.border}`, borderRadius: T.radius.xs, padding: "4px 10px", color: isFav ? T.gold : T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: T.font }}>
+                    <button onClick={() => onAsk(`Analyze ${r.symbol} — buy/sell/hold signal, confidence, risk, entry price, target, and recommended investment amount`)}
+                      style={{ background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.gold, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>Ask ATLAS</button>
+                    <button onClick={() => onToggleFav(r.symbol)}
+                      style={{ background: isFav ? T.goldDim : "rgba(255,255,255,0.05)", border: `0.5px solid ${isFav ? T.goldBorder : T.border}`, borderRadius: T.radius.xs, padding: "4px 10px", color: isFav ? T.gold : T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: T.font }}>
                       {isFav ? "★ Saved" : "☆ Watch"}
                     </button>
                   </div>
@@ -1150,13 +1452,12 @@ function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
         )}
       </div>
 
-      {/* Watchlist */}
+      {/* ── WATCHLIST ── */}
       {favorites.length > 0 ? (
         <>
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>Your Watchlist ({favorites.length})</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>Watchlist ({favorites.length})</div>
           {favorites.map(sym => {
             const d = watchlistData[sym] || {};
-            // Also check if it's in market data
             const mSig = marketData?.signals?.find(s => s.symbol === sym);
             const mTech = marketData?.technicals?.[sym];
             const mQuote = sym === "SPY" ? marketData?.spy : sym === "QQQ" ? marketData?.qqq : sym === "VOO" ? marketData?.voo : null;
@@ -1164,15 +1465,9 @@ function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
             const tech  = d.tech  || mTech;
             const signal = d.signal || mSig;
             return (
-              <MarketCard
-                key={sym}
-                label={sym}
-                quote={quote}
-                signal={signal}
-                tech={tech}
-                isFavorite
-                onToggleFav={onToggleFav}
-                onAsk={onAsk}
+              <MarketCard key={sym} label={sym} quote={quote} signal={signal} tech={tech}
+                isFavorite onToggleFav={onToggleFav} onAsk={onAsk}
+                onCardClick={onCardClick}
               />
             );
           })}
@@ -1185,7 +1480,6 @@ function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
         </div>
       )}
 
-      {/* Default tracked stocks as suggestions if no favorites */}
       {favorites.length === 0 && (
         <div style={{ marginTop: 8 }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>Popular Stocks</div>
@@ -1193,8 +1487,10 @@ function WatchlistTab({ favorites, onToggleFav, onAsk, marketData }) {
             <div key={sym} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 14px", background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, marginBottom: 6 }}>
               <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{sym}</span>
               <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => onAsk(`Analyze ${sym} now — give buy/sell/hold signal, confidence level, risk assessment, and specific entry/target prices`)} style={{ background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.gold, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>Ask ATLAS</button>
-                <button onClick={() => onToggleFav(sym)} style={{ background: "rgba(255,255,255,0.05)", border: `0.5px solid ${T.border}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: T.font }}>☆ Watch</button>
+                <button onClick={() => onAsk(`Analyze ${sym} — buy/sell/hold signal, confidence, risk, entry/target prices, hold time, and how much to invest`)}
+                  style={{ background: T.goldDim, border: `0.5px solid ${T.goldBorder}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.gold, fontSize: 11, cursor: "pointer", fontFamily: T.font }}>Ask ATLAS</button>
+                <button onClick={() => onToggleFav(sym)}
+                  style={{ background: "rgba(255,255,255,0.05)", border: `0.5px solid ${T.border}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: T.font }}>☆ Watch</button>
               </div>
             </div>
           ))}
@@ -1583,6 +1879,7 @@ export default function ATLASv4() {
   const [favorites, setFavorites] = useState(() => { try { return JSON.parse(localStorage.getItem("atlas_favorites") || "[]"); } catch { return []; } });
   const [showAlerts, setShowAlerts] = useState(false);
   const [activeAlertCount, setActiveAlertCount] = useState(() => PriceAlertManager.getActive().length);
+  const [stockDetail, setStockDetail] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -1755,9 +2052,8 @@ export default function ATLASv4() {
 
   const TABS = [
     { id: "chat",      label: "Chat" },
-    { id: "market",    label: "Market" },
-    { id: "watchlist", label: `Watch${favorites.length > 0 ? ` (${favorites.length})` : ""}` },
-    { id: "portfolio", label: "Portfolio" },
+    { id: "market",    label: "Trends" },
+    { id: "watchlist", label: "Watch" },
     { id: "plan",      label: "Plan" },
   ];
 
@@ -1914,62 +2210,112 @@ export default function ATLASv4() {
         </>
       )}
 
-      {/* ── MARKET TAB ── */}
-      {tab === "market" && (
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 32px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <span style={{ fontSize: 11, color: T.textMuted }}>{marketData ? `Updated ${marketData.fetchedAt?.toLocaleTimeString()}` : "Loading…"}</span>
-            <button onClick={fetchMarket} style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.xs, padding: "4px 10px", color: T.gold, cursor: "pointer", fontSize: 11, fontWeight: 500 }}>↻ Refresh</button>
-          </div>
+      {/* ── MARKET TAB — TRENDS ── */}
+      {tab === "market" && (() => {
+        const allStocks = [
+          { label: "SPY", q: marketData?.spy, sig: marketData?.signals?.find(s => s.symbol === "SPY"), tech: marketData?.technicals?.SPY },
+          { label: "QQQ", q: marketData?.qqq, sig: marketData?.signals?.find(s => s.symbol === "QQQ"), tech: marketData?.technicals?.QQQ },
+          { label: "VOO", q: marketData?.voo, sig: marketData?.signals?.find(s => s.symbol === "VOO"), tech: marketData?.technicals?.VOO },
+        ].filter(s => s.q?.c);
+        const trendingUp   = allStocks.filter(s => s.sig?.signal === "BUY"  || s.tech?.compositeSignal === "BULLISH");
+        const trendingDown = allStocks.filter(s => s.sig?.signal === "SELL" || s.tech?.compositeSignal === "BEARISH");
+        const stable       = allStocks.filter(s => !trendingUp.includes(s) && !trendingDown.includes(s));
+        return (
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 32px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: T.text }}>Trends</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{marketData ? `Updated ${marketData.fetchedAt?.toLocaleTimeString()}` : "Loading…"}</div>
+              </div>
+              <button onClick={fetchMarket} style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.xs, padding: "5px 12px", color: T.gold, cursor: "pointer", fontSize: 11, fontWeight: 500 }}>↻ Refresh</button>
+            </div>
 
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>Indices & ETFs</div>
-          {[
-            { label: "S&P 500 — SPY", q: marketData?.spy, sig: marketData?.signals?.find(s => s.symbol === "SPY"), tech: marketData?.technicals?.SPY, sym: "SPY" },
-            { label: "NASDAQ — QQQ",  q: marketData?.qqq, sig: marketData?.signals?.find(s => s.symbol === "QQQ"), tech: marketData?.technicals?.QQQ, sym: "QQQ" },
-            { label: "Vanguard S&P 500 — VOO", q: marketData?.voo, sig: marketData?.signals?.find(s => s.symbol === "VOO"), tech: marketData?.technicals?.VOO, sym: "VOO" },
-          ].map(item => (
-            <MarketCard key={item.label} label={item.label} quote={item.q} signal={item.sig} tech={item.tech}
-              isFavorite={favorites.includes(item.sym)} onToggleFav={toggleFav} onAsk={sendMessage} />
-          ))}
-
-          {marketData?.recommendations && Object.values(marketData.recommendations).some(Boolean) && (
-            <>
-              <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", margin: "16px 0 8px" }}>Wall Street Consensus</div>
-              {Object.entries(marketData.recommendations).map(([sym, rec]) => <AnalystCard key={sym} symbol={sym} rec={rec} />)}
-            </>
-          )}
-
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", margin: "16px 0 8px" }}>Crypto</div>
-          {[
-            { label: "Bitcoin — BTC", q: marketData?.btc, tech: marketData?.technicals?.BTC, sym: "BTC" },
-            { label: "Ethereum — ETH", q: marketData?.eth, tech: marketData?.technicals?.ETH, sym: "ETH" },
-          ].map(item => (
-            <MarketCard key={item.label} label={item.label} quote={item.q} tech={item.tech} isCrypto
-              isFavorite={favorites.includes(item.sym)} onToggleFav={toggleFav} onAsk={sendMessage} />
-          ))}
-
-          {marketData?.news?.length > 0 && (
-            <>
-              <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", margin: "16px 0 8px" }}>Headlines</div>
-              {marketData.news.map((n, i) => (
-                <div key={i} style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: "12px 14px", marginBottom: 8, cursor: "pointer" }} onClick={() => sendMessage(`What is the market impact of this news: "${n.headline}"?`)}>
-                  <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, marginBottom: 5 }}>{n.headline}</div>
-                  <div style={{ fontSize: 10, color: T.textMuted }}>{n.source} · {new Date(n.datetime * 1000).toLocaleDateString()} · Tap to analyze</div>
+            {/* Trending Up */}
+            {trendingUp.length > 0 && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: T.green, boxShadow: `0 0 6px ${T.green}` }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: T.green, textTransform: "uppercase", letterSpacing: "0.07em" }}>Trending Up — likely to rise</span>
                 </div>
-              ))}
-            </>
-          )}
-        </div>
-      )}
+                {trendingUp.map(item => (
+                  <MarketCard key={item.label} label={item.label} quote={item.q} signal={item.sig} tech={item.tech}
+                    isFavorite={favorites.includes(item.label)} onToggleFav={toggleFav} onAsk={sendMessage}
+                    onCardClick={setStockDetail} />
+                ))}
+              </>
+            )}
 
-      {/* ── WATCHLIST TAB ── */}
+            {/* Trending Down */}
+            {trendingDown.length > 0 && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, margin: `${trendingUp.length > 0 ? "16px" : "0"} 0 8px` }}>
+                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: T.red, boxShadow: `0 0 6px ${T.red}` }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: T.red, textTransform: "uppercase", letterSpacing: "0.07em" }}>Trending Down — watch for weakness</span>
+                </div>
+                {trendingDown.map(item => (
+                  <MarketCard key={item.label} label={item.label} quote={item.q} signal={item.sig} tech={item.tech}
+                    isFavorite={favorites.includes(item.label)} onToggleFav={toggleFav} onAsk={sendMessage}
+                    onCardClick={setStockDetail} />
+                ))}
+              </>
+            )}
+
+            {/* Stable / Watching */}
+            {stable.length > 0 && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, margin: `${(trendingUp.length > 0 || trendingDown.length > 0) ? "16px" : "0"} 0 8px` }}>
+                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: T.gold }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: T.gold, textTransform: "uppercase", letterSpacing: "0.07em" }}>Stable — no clear direction yet</span>
+                </div>
+                {stable.map(item => (
+                  <MarketCard key={item.label} label={item.label} quote={item.q} signal={item.sig} tech={item.tech}
+                    isFavorite={favorites.includes(item.label)} onToggleFav={toggleFav} onAsk={sendMessage}
+                    onCardClick={setStockDetail} />
+                ))}
+              </>
+            )}
+
+            {/* Wall Street Consensus */}
+            {marketData?.recommendations && Object.values(marketData.recommendations).some(Boolean) && (
+              <>
+                <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", margin: "18px 0 8px" }}>Wall St. Consensus</div>
+                {Object.entries(marketData.recommendations).map(([sym, rec]) => <AnalystCard key={sym} symbol={sym} rec={rec} />)}
+              </>
+            )}
+
+            {/* Crypto */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "18px 0 8px" }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: T.gold, textTransform: "uppercase", letterSpacing: "0.07em" }}>⚡ Crypto</span>
+            </div>
+            {[
+              { label: "BTC", q: marketData?.btc, tech: marketData?.technicals?.BTC, sig: null },
+              { label: "ETH", q: marketData?.eth, tech: marketData?.technicals?.ETH, sig: null },
+            ].map(item => (
+              <MarketCard key={item.label} label={item.label} quote={item.q} tech={item.tech} isCrypto
+                isFavorite={favorites.includes(item.label)} onToggleFav={toggleFav} onAsk={sendMessage}
+                onCardClick={setStockDetail} />
+            ))}
+
+            {/* Headlines */}
+            {marketData?.news?.length > 0 && (
+              <>
+                <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", margin: "18px 0 8px" }}>Headlines</div>
+                {marketData.news.map((n, i) => (
+                  <div key={i} style={{ background: T.card, border: `0.5px solid ${T.border}`, borderRadius: T.radius.md, padding: "12px 14px", marginBottom: 8, cursor: "pointer" }}
+                    onClick={() => sendMessage(`What is the market impact of this news: "${n.headline}"?`)}>
+                    <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, marginBottom: 5 }}>{n.headline}</div>
+                    <div style={{ fontSize: 10, color: T.textMuted }}>{n.source} · {new Date(n.datetime * 1000).toLocaleDateString()} · Tap to analyze</div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── WATCH + PORTFOLIO TAB ── */}
       {tab === "watchlist" && (
-        <WatchlistTab favorites={favorites} onToggleFav={toggleFav} onAsk={sendMessage} marketData={marketData} />
-      )}
-
-      {/* ── PORTFOLIO TAB ── */}
-      {tab === "portfolio" && (
-        <PortfolioTab onAsk={sendMessage} />
+        <WatchlistTab favorites={favorites} onToggleFav={toggleFav} onAsk={sendMessage} marketData={marketData} onCardClick={setStockDetail} />
       )}
 
       {/* ── PLAN TAB ── */}
@@ -2017,6 +2363,19 @@ export default function ATLASv4() {
       )}
 
       {showAlerts && <PriceAlertsPanel onClose={() => { setShowAlerts(false); setActiveAlertCount(PriceAlertManager.getActive().length); }} />}
+
+      {stockDetail && (
+        <StockDetailModal
+          symbol={stockDetail.symbol}
+          quote={stockDetail.quote}
+          signal={stockDetail.signal}
+          tech={stockDetail.tech}
+          isFavorite={favorites.includes(stockDetail.symbol)}
+          onToggleFav={toggleFav}
+          onAsk={(msg) => { sendMessage(msg); setTab("chat"); }}
+          onClose={() => setStockDetail(null)}
+        />
+      )}
     </div>
   );
 }
